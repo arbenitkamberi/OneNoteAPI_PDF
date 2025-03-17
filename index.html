@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>OneNote API</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.2.228/pdf.min.js"></script>
+        <style>
+
+        </style>
+    </head>
+    <body>
+        <div id="graphExplorerContainer">
+            <input type="text" id="authToken" name="authToken" oninput="onAuthTokenInput(this);" />
+            <label for="authToken"><a href="https://developer.microsoft.com/de-de/graph/graph-explorer" target="_blank" id="getAuthToken">Authentication token</a></label>
+            <br />
+        </div>
+
+        <div id="notebooksContainer">
+            <div id="loadbar_notebooks" style="margin-block-start: 1em; margin-block-end: 1em;"></div>
+            <ul id="notebokksListFavs"></ul>
+            <button id="showAllBtn" onclick="showAll(event)">Show all</button>
+            <br />
+            <ul id="notebooksList" style="display: none;">
+            </ul>
+        </div>
+        
+        <div id="sectionsContainer" style="border-top: 1px solid #949494; margin-top: 1em;">
+            <p id="selectedSection"></p>
+            <ul id="sectionsList">
+            </ul>
+        </div>
+        <p id="currentSelectedSection"></p>
+
+        <div id="pushContainer" class="unvisible">
+            <input id="pageTitle" type="text" name="pageTitle">
+            <label for="pageTitle">Title</label><br /><br />
+
+            <input id="pdfInput" type="file" name="pdfInput" oninput="onPdfInput(this);">
+            <label for="pdfInput">PDF</label><br />
+
+            <input id="viewPortUnit" type="range" min="1" max="5" name="viewPortUnit" value="3" onchange="onViewPortUnitChange()"/>
+            <label for="viewPortUnit">View Port Units (1-5)</label><br />
+
+            <input id="maxNrOfPagesPerIteration" type="number" min="1" max="10" name="maxNrOfPagesPerIteration" value="3" />
+            <label for="maxNrOfPagesPerIteration"># of pages to be uploaded per iteration</label><br /><br />
+
+            <button onClick="createPage(event)">Create</button><br />
+            <div id="retryContainer"></div><br />
+            <div id="loadingDiv"></div><br /><br />
+
+            <canvas id="pdf-canvas" width="1000"></canvas>
+        </div>
+
+        <script>
+            let authToken = localStorage.getItem("authToken") || "";
+            
+            let notebooks = [];
+            let sections = [];
+            let selectedSectionId;
+            let pdf;
+
+            const showAll = (event) => {
+                let showAllBtn = document.getElementById("showAllBtn");
+                let notebooksList = document.getElementById("notebooksList");
+                if (showAllBtn.innerHTML === "Collapse") {
+                    notebooksList.style.display = "none";
+                    showAllBtn.innerHTML = "Show All";
+                }
+                else { //Click on Show All
+                    notebooksList.style.display = "block";
+                    showAllBtn.innerHTML = "Collapse";
+                }
+            }
+
+            const openAuthTokenTab = () => {
+                document.getElementById("getAuthToken").click();
+            }
+
+            const onAuthTokenInput = (elem) => {
+                if (!elem.value) { //No Authtoken set
+                    openAuthTokenTab();
+                }
+                authToken = `Bearer ${elem.value}`;
+                localStorage.setItem("authToken", elem.value);
+
+                let loadbar_notebooks = document.getElementById("loadbar_notebooks");
+                loadbar_notebooks.innerHTML = "Loading...";
+                initNotebooks().finally(() => loadbar_notebooks.innerHTML = "");
+            }
+
+            const getRes = async (url) => {
+                const res = await fetch(url, {
+                    headers: {
+                        Authorization: authToken
+                    }
+                });
+                const json = await res.json();
+
+                return {
+                    status: res.status,
+                    statusText: res.statusText,
+                    json_val: (json ?? {}).value || []
+                };
+            }
+
+            const getJsonVal = async (url) => {
+                return (await getRes(url)).json_val;
+            }
+
+            const initNotebooks = async () => {
+                const res = await getRes("https://graph.microsoft.com/v1.0/me/onenote/notebooks");
+                if (res.status === 401) { //Unauthorized
+                    document.getElementById("authToken").setAttribute("value", "");
+                    openAuthTokenTab();
+                }
+                else {
+                    notebooks = res.json_val;
+                    updateNotebooksList();
+                }
+            }
+
+            const updateNotebooksList = () => {
+                const favs = document.getElementById("notebokksListFavs");
+                const notebookFavs = localStorage.getItem("notebookFavs");
+                let favNames = JSON.parse(notebookFavs || "[]");
+                favs.innerHTML = notebooks.filter((notebook) => favNames.includes(notebook.displayName))
+                                        .map((notebook) => `<li id="${notebook.id}" sections_url="${notebook.sectionsUrl}" section_name="${notebook.displayName}" onClick="onNotebookSelect(this)">${notebook.displayName}</li>`).join("");
+
+                const list = document.getElementById("notebooksList");
+                list.innerHTML = notebooks.map((notebook) => `<li id="${notebook.id}" sections_url="${notebook.sectionsUrl}" section_name="${notebook.displayName}" onClick="onNotebookSelect(this)">${notebook.displayName}</li>`).join("");
+            }
+
+            const initSections = async (url) => {
+                sections = await getJsonVal(url);
+
+                updateSectionsList();
+            }
+
+            const updateSectionsList = () => {
+                const list = document.getElementById("sectionsList");
+                list.innerHTML = sections.map((section) => `<li id="${section.id}" section_name="${section.displayName}" onClick="onSectionSelect(this)">${section.displayName}</li>`).join("");
+            }
+
+            const onNotebookSelect = (elem) => {
+                document.getElementById("selectedSection").innerHTML = elem.getAttribute("section_name");
+
+                let loadbar_sections = document.getElementById("currentSelectedSection");
+                loadbar_sections.innerHTML = "Loading...";
+                document.getElementById("sectionsList").innerHTML = "";
+                initSections(elem.getAttribute("sections_url")).finally(() => loadbar_sections.innerHTML = "");
+            }
+
+            const onSectionSelect = async (elem) => {
+                selectedSectionId = elem.getAttribute("id");
+                document.getElementById("currentSelectedSection").innerHTML = `${elem.getAttribute("section_name")} - ${selectedSectionId}`;
+            }
+
+            const onViewPortUnitChange = () => {
+                if (pdf) { //onPdfInput was called once (pdf uploaded)
+                    renderPdfPage(1);
+                }
+            }
+
+            const onPdfInput = (elem) => {
+                const file = elem.files[0];
+                const reader = new FileReader();
+
+                reader.addEventListener("load", async () => {
+                    const binary_data = reader.result;
+
+                    pdf = await pdfjsLib.getDocument({ data: binary_data });
+                    const nrOfPages = pdf.numPages;
+
+                    renderPdfPage(1);
+                }, false);
+
+                reader.readAsBinaryString(file);
+            }
+
+            const renderPdfPage = async (pageNr) => {
+                const page = await pdf.getPage(pageNr);
+                const viewPortUnit = document.getElementById("viewPortUnit").value;
+                const viewport = page.getViewport(Number.parseInt(viewPortUnit));
+                const canvas = document.querySelector('#pdf-canvas');
+                canvas.setAttribute("height", viewport.height);
+                canvas.setAttribute("width", viewport.width);
+                const renderContext = {
+                    canvasContext: canvas.getContext('2d'),
+                    viewport: viewport
+                };
+                await page.render(renderContext);
+                return await page.getAnnotations();
+            }
+
+            const createPage = async () => {
+                const title = document.getElementById("pageTitle").value;
+                const res = await fetch("./OneNotePageTemplate.html");
+                let body = await res.text();
+
+                body = body.replace("ATTR_TITLE", title);
+
+                const formData = new FormData();
+                const canvas = document.getElementById('pdf-canvas');
+
+                //Setup (Convert PDF to images)
+                const getImages = () => {
+                    const promise = new Promise(async (resolve, reject) => {
+                        const images = [];
+                        for (let i = 1; i <= pdf.numPages; i++) {
+                            let ann = await renderPdfPage(i) || [];
+
+                            canvas.toBlob((blob) => { //This is exectuted asynchronously, thus the promise around it
+                                images.push({
+                                    blob,
+                                    annotations: ann.filter((e) => e.subtype === "Link").map((e) => e.url)
+                                });
+                                if (images.length === pdf.numPages) {
+                                    resolve(images);
+                                }
+                            }, "image/png", 1);
+                        }
+                    });
+                    return promise;
+                }
+                let images = await getImages();
+
+
+                //First Presentation request (Create Page)
+                const imagesHTML = [];
+                const maxNrOfPagesPerIteration = Number.parseInt(document.getElementById("maxNrOfPagesPerIteration").value);
+                const nrOfPagesPerReq = pdf.numPages < maxNrOfPagesPerIteration ? pdf.numPages : maxNrOfPagesPerIteration;
+                for (let i = 1; i <= nrOfPagesPerReq; i++) {
+                    const name = `image${i}`;
+                    imagesHTML.push(`<img src="name:${name}" width="900" />`);
+                    for (ann in images[0].annotations) {
+                        imagesHTML.push(`<br/><a href="${ann}">${ann}</a>`);
+                    }
+                    formData.append(name, images[0]);
+                    images = images.slice(1); //Remove first page from array
+                }
+
+                body = `${body.replace("ATTR_IMG", imagesHTML.join("<br/>"))}<br/>`;
+
+                formData.append("Presentation", new Blob([body], {type: "text/html"}));
+
+                const request = new XMLHttpRequest();
+                request.open("POST", `https://graph.microsoft.com/v1.0/me/onenote/sections/${selectedSectionId}/pages`);
+                request.setRequestHeader("Authorization", authToken);
+
+                request.send(formData);
+
+                const loadingDiv = document.getElementById("loadingDiv")
+                loadingDiv.innerHTML = "Loading...";
+                request.onloadend = () => {
+                    loadingDiv.innerHTML = `${request.status} - ${request.statusText}`;
+                }
+
+                //Rest
+                request.onload = () => {
+                    if (request.status === 201) { //Created
+                        const location = request.getResponseHeader("Location");
+                        const locationParts = location.split("/");
+                        const pageId = locationParts[locationParts.length - 1];
+
+                        window.setTimeout(() => appendImages(images, pageId), 2000);
+                    }
+                }
+                request.onerror = (error) => {
+                    loadingDiv.innerHTML = `Error - (${request.status} - ${request.statusText}), ${JSON.stringify(error)}`;
+                }
+
+                return body;
+            }
+
+            const appendImages = async (images, pageId) => {
+                const loadingDiv = document.getElementById("loadingDiv");
+                if (images.length > 0) {
+                    const request = getAppendReq(pageId);
+                    const formData = new FormData();
+
+                    const commands = [];
+                    const maxNrOfPagesPerIteration = Number.parseInt(document.getElementById("maxNrOfPagesPerIteration").value);
+                    const nrOfPagesPerReq = pdf.numPages < maxNrOfPagesPerIteration ? pdf.numPages : maxNrOfPagesPerIteration;
+                    const nrOfIterations = images.length < nrOfPagesPerReq ? images.length : nrOfPagesPerReq;
+                    for (let i = 0; i < nrOfIterations; i++) {
+                        const name = `image${i}`;
+                        commands.push({
+                            target: 'body',
+                            action: 'append',
+                            content: `<img src="name:${name}" width="900" /><br/>`
+                        });
+                        for(ann in images[0].annotations) {
+                            commands.push({
+                                target: 'body',
+                                action: 'append',
+                                content: `<a href="${ann}">${ann}</a>`
+                            });
+                        }
+                        formData.append(name, images[0].blob);
+                        images = images.slice(1);
+                    }
+                    formData.append("Commands", new Blob([JSON.stringify(commands)], {type: "application/json"}));
+                    request.send(formData);
+
+                    const loadingText = `Loading... (Sending ${commands.length} images, ${images.length} remaining)`;
+                    loadingDiv.innerHTML = loadingText;
+
+
+                    const reqOnLoad = (req) => {
+                        if (req.status === 204) { //Error 429 = Request is too large! (Failed to load resource: Origin https://n.ethz.ch is not allowed by Access-Control-Allow-Origin. Status code: 429)
+                            if (images.length === 0) {
+                                loadingDiv.innerHTML = `${req.status} - ${req.statusText} (0 remaining)`;
+                            }
+                            appendImages(images, pageId);
+                        }
+                        else if (req.status >= 400) {
+                            reqOnError({error: "unknown error (custom)"}, req);
+                        }
+                        else {
+                            loadingDiv.innerHTML = `${req.status} - ${req.statusText} (${images.length + commands.length} remaining)`;
+                        }
+                    }
+                    const reqOnError = (error, req, counter = 0) => {
+                        //Retry mechanism (same commands)
+                        if (counter <= 4) { //Retry 5 times automatically
+                            loadingDiv.innerHTML = `(Retrying in 1sec) Error - (${req.status} - ${req.statusText}), ${JSON.stringify(error)}`;
+                            window.setTimeout(() => retry(), 1000);
+                        }
+                        else { //Manual retry
+                            document.getElementById("retryContainer").innerHTML = '<button id="retryBtn">Retry</button>';
+                            document.getElementById("retryBtn").onclick = () => retry();
+                        }
+                    }
+                    const retry = () => {
+                        loadingDiv.innerHTML = loadingText;
+
+                        const req = getAppendReq(pageId);
+                        req.send(formData);
+
+                        req.onload = () => reqOnLoad(req);
+                        req.onerror = (error) => reqOnError(error, req, counter + 1);
+                    }
+                    
+                    request.onload = () => reqOnLoad(request);
+                    request.onerror = (error) => reqOnError(error, request);
+                }
+                else {
+                    loadingDiv.innerHTML = `${loadingDiv.innerHTML} (Finished)`;
+                }
+            }
+
+            const getAppendReq = (pageId) => {
+                const request = new XMLHttpRequest();
+                request.open("PATCH", `https://graph.microsoft.com/v1.0/me/onenote/pages/${pageId}/content`);
+                request.setRequestHeader("Authorization", authToken);
+
+                return request;
+            }
+
+
+            document.getElementById("authToken").setAttribute("value", authToken);
+            onAuthTokenInput({value: authToken});
+        </script>
+    </body>
+</html>
